@@ -283,6 +283,57 @@ describe("mutation op application", () => {
 	});
 });
 
+describe("large pages", () => {
+	it("applies a 60-entity page in order, honoring rev guards past any read-chunk boundary", async () => {
+		// Pre-seed one entity (late in the page's entity order) at rev 3.
+		const seeded = await contentOp({
+			seq: "50", kind: "observation", localId: "700055",
+			rev: "3", payload: observationPayload({ title: "seeded high rev" }),
+		});
+		expect((await post(projectionBody({ ops: [seeded], throughSeq: "50" }))).status).toBe(200);
+
+		// One page: 60 distinct entities; entity 700055 arrives again at
+		// STALE rev 1 in position 56 — far past a 50-entity read chunk.
+		const ops = [];
+		let seq = 100;
+		for (let i = 0; i < 60; i++) {
+			const localId = `${700000 + i}`;
+			ops.push(await contentOp({
+				seq: `${seq++}`, kind: "observation", localId,
+				rev: "1",
+				payload: observationPayload({ title: `bulk item ${i}` }),
+			}));
+		}
+		const res = await post(projectionBody({ ops, throughSeq: `${seq - 1}` }));
+		expect(res.status).toBe(200);
+
+		const total = await env.MEMDB
+			.prepare("SELECT COUNT(*) AS n FROM observations WHERE title LIKE 'bulk item %' OR title = 'seeded high rev'")
+			.first<{ n: number }>();
+		expect(total?.n).toBe(60);
+
+		// The stale rev-1 op for the seeded entity must NOT have clobbered rev 3.
+		const entityId = await stableDocumentId("observation", "test-device-1", "700055");
+		const row = await observationRow(entityId);
+		expect(row?.title).toBe("seeded high rev");
+	});
+
+	it("later rev wins when one entity appears twice in the same page", async () => {
+		const first = await contentOp({
+			seq: "200", kind: "observation", localId: "800001",
+			rev: "1", payload: observationPayload({ title: "same-page v1" }),
+		});
+		const second = await contentOp({
+			seq: "201", kind: "observation", localId: "800001",
+			rev: "2", payload: observationPayload({ title: "same-page v2" }),
+		});
+		expect((await post(projectionBody({ ops: [first, second], throughSeq: "201" }))).status).toBe(200);
+		const entityId = await stableDocumentId("observation", "test-device-1", "800001");
+		const row = await observationRow(entityId);
+		expect(row?.title).toBe("same-page v2");
+	});
+});
+
 describe("poison ops", () => {
 	it("records and skips a corrupt op, still answering the full checkpoint echo", async () => {
 		const healthy = await contentOp({ seq: "40", kind: "observation", localId: "106" });

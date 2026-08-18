@@ -61,31 +61,98 @@ export async function handleProject(request: Request, env: Env): Promise<Respons
 	}
 
 	await ensureSchema(env.MEMDB);
-	for (const op of envelope.ops) {
-		let body: CanonicalContentBody;
-		try {
-			({ body } = await parseCanonicalOperation({
-				body: op.body,
-				operation_sha256: op.operation_sha256,
-			}));
-		} catch (error) {
-			await recordSkip(env.MEMDB, op.seq, error);
-			continue;
-		}
-		try {
-			await applyOp(env.MEMDB, body);
-		} catch (error) {
-			// An op the canonical validator accepted but we cannot apply must not
-			// wedge the checkpoint either — record it and move on.
-			await recordSkip(env.MEMDB, op.seq, error);
-		}
-	}
+	await applyPage(env.MEMDB, envelope.ops);
 
 	return Response.json({
 		protocol_version: 1,
 		epoch: envelope.epoch,
 		projected_through_seq: envelope.throughSeq,
 	});
+}
+
+/**
+ * Apply one page with a bounded number of D1 round trips: parse everything,
+ * prefetch every entity's current rev in chunked SELECTs, walk the ops in
+ * seq order against an in-memory rev map, and commit all surviving
+ * statements in ONE db.batch (a single D1 transaction). The naive
+ * one-read-one-write-per-op shape (~200 sequential round trips for a full
+ * 100-op page) took long enough that pushing clients timed out mid-drain
+ * and the projection checkpoint crawled a page per 90s lease cycle.
+ */
+async function applyPage(db: D1Database, ops: readonly WireOp[]): Promise<void> {
+	const parsed: Array<{ seq: string; body: CanonicalContentBody }> = [];
+	for (const op of ops) {
+		try {
+			const { body } = await parseCanonicalOperation({
+				body: op.body,
+				operation_sha256: op.operation_sha256,
+			});
+			parsed.push({ seq: op.seq, body });
+		} catch (error) {
+			// A malformed op must never wedge the checkpoint — record and skip.
+			await recordSkip(db, op.seq, error);
+		}
+	}
+	if (parsed.length === 0) return;
+
+	const revs = await fetchCurrentRevs(db, parsed.map(({ body }) => body.id));
+	const statements: D1PreparedStatement[] = [];
+	for (const { seq, body } of parsed) {
+		const current = revs.get(body.id);
+		if (current !== undefined && compareCanonicalDecimals(current, body.entity_rev) >= 0) {
+			continue; // replayed page or stale rev — already reflected
+		}
+		try {
+			statements.push(
+				db
+					.prepare(
+						`INSERT INTO entities (entity_id, kind, entity_rev, deleted) VALUES (?, ?, ?, ?)
+						 ON CONFLICT(entity_id) DO UPDATE SET entity_rev = excluded.entity_rev, deleted = excluded.deleted`,
+					)
+					.bind(body.id, body.kind, body.entity_rev, body.deleted ? 1 : 0),
+			);
+			if (body.kind === "mutation") {
+				statements.push(...(await mutationStatements(db, body.mutation as CanonicalMutation)));
+			} else if (body.deleted) {
+				statements.push(
+					db.prepare(`DELETE FROM ${tableFor(body.kind)} WHERE entity_id = ?`).bind(body.id),
+				);
+			} else {
+				statements.push(contentUpsert(db, body));
+			}
+			revs.set(body.id, body.entity_rev); // later ops in this page see this rev
+		} catch (error) {
+			// An op the canonical validator accepted but we cannot translate must
+			// not wedge the checkpoint either — record it and move on.
+			await recordSkip(db, seq, error);
+		}
+	}
+	if (statements.length > 0) {
+		await db.batch(statements);
+	}
+}
+
+/** D1 caps bound parameters per statement; read the rev map in chunks. */
+const REV_CHUNK = 50;
+
+async function fetchCurrentRevs(
+	db: D1Database,
+	entityIds: readonly string[],
+): Promise<Map<string, string>> {
+	const unique = [...new Set(entityIds)];
+	const revs = new Map<string, string>();
+	for (let i = 0; i < unique.length; i += REV_CHUNK) {
+		const chunk = unique.slice(i, i + REV_CHUNK);
+		const rows = await db
+			.prepare(
+				`SELECT entity_id, entity_rev FROM entities
+				 WHERE entity_id IN (${chunk.map(() => "?").join(", ")})`,
+			)
+			.bind(...chunk)
+			.all<{ entity_id: string; entity_rev: string }>();
+		for (const row of rows.results) revs.set(row.entity_id, row.entity_rev);
+	}
+	return revs;
 }
 
 function parseEnvelope(value: unknown): Envelope | null {
@@ -121,36 +188,6 @@ async function recordSkip(db: D1Database, seq: string, error: unknown): Promise<
 		)
 		.bind(seq, reason.slice(0, 500))
 		.run();
-}
-
-async function applyOp(db: D1Database, body: CanonicalContentBody): Promise<void> {
-	const current = await db
-		.prepare("SELECT entity_rev FROM entities WHERE entity_id = ?")
-		.bind(body.id)
-		.first<{ entity_rev: string }>();
-	if (current && compareCanonicalDecimals(current.entity_rev, body.entity_rev) >= 0) {
-		return; // replayed page or stale rev — already reflected
-	}
-
-	const statements: D1PreparedStatement[] = [
-		db
-			.prepare(
-				`INSERT INTO entities (entity_id, kind, entity_rev, deleted) VALUES (?, ?, ?, ?)
-				 ON CONFLICT(entity_id) DO UPDATE SET entity_rev = excluded.entity_rev, deleted = excluded.deleted`,
-			)
-			.bind(body.id, body.kind, body.entity_rev, body.deleted ? 1 : 0),
-	];
-
-	if (body.kind === "mutation") {
-		statements.push(...(await mutationStatements(db, body.mutation as CanonicalMutation)));
-	} else if (body.deleted) {
-		statements.push(
-			db.prepare(`DELETE FROM ${tableFor(body.kind)} WHERE entity_id = ?`).bind(body.id),
-		);
-	} else {
-		statements.push(contentUpsert(db, body));
-	}
-	await db.batch(statements);
 }
 
 function tableFor(kind: "observation" | "summary" | "prompt"): string {
