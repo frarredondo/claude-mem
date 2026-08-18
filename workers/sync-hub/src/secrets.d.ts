@@ -17,7 +17,7 @@ interface Env {
 	 * AUTH_MODE and SYNC_STATIC_USER_ID are vars in the personal config only
 	 * (absent from wrangler.jsonc, hence typed here, not generated);
 	 * SYNC_STATIC_TOKEN is a secret: `wrangler secret put SYNC_STATIC_TOKEN
-	 * -c wrangler.personal.jsonc`.
+	 * -c wrangler.personal.local.jsonc` (the gitignored copy of the template).
 	 */
 	AUTH_MODE?: string;
 	SYNC_STATIC_USER_ID?: string;

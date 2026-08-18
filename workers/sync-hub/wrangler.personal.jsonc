@@ -1,7 +1,16 @@
 /**
- * Personal self-hosted deployment of the sync hub (deploy with
- * `wrangler deploy -c wrangler.personal.jsonc`). Differences from the
- * cmem.ai config (wrangler.jsonc):
+ * TEMPLATE for a personal self-hosted deployment of the sync hub. This file
+ * stays committed with placeholders only — your real resource ids and
+ * workers.dev URLs live in a gitignored copy:
+ *
+ *   cp wrangler.personal.jsonc wrangler.personal.local.jsonc
+ *   # fill in the REPLACE_WITH_* values and <SUBDOMAIN>
+ *   wrangler deploy -c wrangler.personal.local.jsonc
+ *
+ * (Resource ids are not credentials, but keeping them out of the repo keeps
+ * your endpoints un-probeable from the public history.)
+ *
+ * Differences from the cmem.ai config (wrangler.jsonc):
  *
  *   - AUTH_MODE=static: one shared token (SYNC_STATIC_TOKEN secret) and one
  *     canonical user id below replace the cmem.ai verify endpoint entirely —
@@ -13,7 +22,7 @@
  *     the remote MCP endpoint. The hub REQUIRES a live projector: pushes are
  *     503 until the projection checkpoint covers head_seq.
  *
- * Secrets (wrangler secret put <NAME> -c wrangler.personal.jsonc):
+ * Secrets (wrangler secret put <NAME> -c wrangler.personal.local.jsonc):
  *   SYNC_STATIC_TOKEN              — openssl rand -hex 32; the same value goes
  *                                    into CLAUDE_MEM_CLOUD_SYNC_TOKEN on every
  *                                    machine.

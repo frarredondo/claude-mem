@@ -18,7 +18,7 @@ machines (claude-mem worker) ──push/pull──▶ sync-hub-personal (Durable
 ## 0. Mint the credentials (once)
 
 ```sh
-uuidgen | tr 'A-Z' 'a-z'      # SYNC_STATIC_USER_ID  (not secret; already set in wrangler.personal.jsonc)
+uuidgen | tr 'A-Z' 'a-z'      # SYNC_STATIC_USER_ID  (goes into your gitignored wrangler.personal.local.jsonc)
 openssl rand -hex 32          # SYNC_STATIC_TOKEN    (sync credential, shared by your machines)
 openssl rand -hex 32          # CMEM_INTERNAL_PROJECTOR_SECRET (hub ⇄ projector, also the admin-API credential)
 openssl rand -hex 32          # MCP_TOKEN            (remote MCP credential)
@@ -28,10 +28,11 @@ openssl rand -hex 32          # MCP_TOKEN            (remote MCP credential)
 
 ```sh
 cd workers/self-host
-wrangler d1 create cmem-memory          # paste the id into wrangler.jsonc
-wrangler secret put CMEM_INTERNAL_PROJECTOR_SECRET
-wrangler secret put MCP_TOKEN
-wrangler deploy                         # → https://cmem-self-host.<sub>.workers.dev
+cp wrangler.jsonc wrangler.local.jsonc  # gitignored copy holds your real ids
+wrangler d1 create cmem-memory          # paste the id into wrangler.local.jsonc
+wrangler secret put CMEM_INTERNAL_PROJECTOR_SECRET -c wrangler.local.jsonc
+wrangler secret put MCP_TOKEN                      -c wrangler.local.jsonc
+wrangler deploy -c wrangler.local.jsonc # → https://cmem-self-host.<sub>.workers.dev
 ```
 
 The D1 schema applies itself lazily and idempotently — there is no
@@ -43,10 +44,11 @@ The D1 schema applies itself lazily and idempotently — there is no
 cd workers/sync-hub
 wrangler kv namespace create sync-hub-personal-AUTH_CACHE
 # paste the namespace id + your SYNC_STATIC_USER_ID + the cmem-self-host URL
-# into wrangler.personal.jsonc, then:
-wrangler secret put SYNC_STATIC_TOKEN              -c wrangler.personal.jsonc
-wrangler secret put CMEM_INTERNAL_PROJECTOR_SECRET -c wrangler.personal.jsonc   # same value as step 1
-wrangler deploy -c wrangler.personal.jsonc         # → https://sync-hub-personal.<sub>.workers.dev
+# into a gitignored copy of the committed template, then:
+cp wrangler.personal.jsonc wrangler.personal.local.jsonc   # fill in the REPLACE_WITH_* values
+wrangler secret put SYNC_STATIC_TOKEN              -c wrangler.personal.local.jsonc
+wrangler secret put CMEM_INTERNAL_PROJECTOR_SECRET -c wrangler.personal.local.jsonc   # same value as step 1
+wrangler deploy -c wrangler.personal.local.jsonc   # → https://sync-hub-personal.<sub>.workers.dev
 ```
 
 Verify the hub ⇄ projector wiring end to end:
@@ -127,7 +129,7 @@ Workers Free daily caps; the client's backoff resumes it losslessly.
 ## Notes
 
 - **Token rotation**: `wrangler secret put SYNC_STATIC_TOKEN -c
-  wrangler.personal.jsonc`, then update the settings file on each machine.
+  wrangler.personal.local.jsonc`, then update the settings file on each machine.
   No cache to wait out — static mode never touches KV.
 - **Free-plan caps** (reset midnight UTC) degrade sync to latency, never
   loss: unsynced rows stay queued locally and the drain retries.
