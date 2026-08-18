@@ -239,6 +239,10 @@ export async function authenticateRequest(
 		return { ok: false, response: errorResponse(401, "missing X-User-Id header") };
 	}
 
+	if (env.AUTH_MODE === "static") {
+		return authenticateStatic(env, token, userId, deviceId, deviceName);
+	}
+
 	const cacheKey = await verdictCacheKey(userId, token);
 	let cached: string | null = null;
 	try {
@@ -302,6 +306,51 @@ export async function authenticateRequest(
 		ok: false,
 		response: errorResponse(503, `token verification failed (${verifyRes.status})`),
 	};
+}
+
+/**
+ * AUTH_MODE=static — the self-host path. One shared token (Worker secret) and
+ * one canonical user id (var) ARE the account plane, so there is no verify
+ * endpoint, no KV verdict cache, and nothing to rotate but the secret itself.
+ * Fail-closed on missing config: a deployment that declares static mode but
+ * lacks either binding must reject everything (503), never fall through to
+ * the verify path with whatever TOKEN_VERIFY_URL happens to contain.
+ */
+async function authenticateStatic(
+	env: Env,
+	token: string,
+	userId: string,
+	deviceId: string | null,
+	deviceName: string | null,
+): Promise<AuthOk | AuthFail> {
+	const configuredUserId = (env.SYNC_STATIC_USER_ID ?? "").trim();
+	const configuredToken = (env.SYNC_STATIC_TOKEN ?? "").trim();
+	if (configuredUserId.length === 0 || configuredToken.length === 0) {
+		return { ok: false, response: errorResponse(503, "static auth is not configured") };
+	}
+	if (!(await tokensMatch(token, configuredToken))) {
+		return { ok: false, response: errorResponse(401, "invalid token") };
+	}
+	// Same canonical-binding contract as the verify path: the token authorizes
+	// exactly one user id, so a foreign X-User-Id is a 403, not a 401.
+	// Same canonical-binding contract as the verify path: the token authorizes
+	// exactly one user id, so a foreign X-User-Id is a 403, not a 401.
+	if (userId !== configuredUserId) {
+		return {
+			ok: false,
+			response: errorResponse(403, "token does not belong to the presented user id"),
+		};
+	}
+	return { ok: true, userId, deviceId, deviceName };
+}
+
+/** Constant-time equality; digesting first normalizes lengths. */
+async function tokensMatch(presented: string, configured: string): Promise<boolean> {
+	const [presentedDigest, configuredDigest] = await Promise.all([
+		crypto.subtle.digest("SHA-256", encoder.encode(presented)),
+		crypto.subtle.digest("SHA-256", encoder.encode(configured)),
+	]);
+	return crypto.subtle.timingSafeEqual(presentedDigest, configuredDigest);
 }
 
 async function handlePushOps(
@@ -584,6 +633,21 @@ export async function fetchProjectionWithTimeout(
 	}
 }
 
+/**
+ * Same-account limitation: a Worker cannot fetch another Worker's
+ * *.workers.dev URL in its own zone — the subrequest never routes to the
+ * target Worker. Self-host deployments therefore declare a PROJECTOR service
+ * binding (wrangler.personal.jsonc) and projection pages go through it; the
+ * cmem.ai deployment has no binding and keeps using global fetch. The
+ * INTERNAL_PROJECTOR_URL is still passed as the request URL — service
+ * bindings deliver it verbatim to the bound Worker.
+ */
+function projectorBindingFetch(env: Env): ProjectionFetch | undefined {
+	const projector = env.PROJECTOR;
+	if (!projector) return undefined;
+	return (input, init) => projector.fetch(input, init);
+}
+
 export interface ProjectionDrainDependencies {
 	/** Test seam only; production always uses the 45-second constant. */
 	fetchTimeoutMs?: number;
@@ -710,7 +774,7 @@ export async function drainProjection(
 					requestBody,
 					env.CMEM_INTERNAL_PROJECTOR_SECRET,
 					dependencies.fetchTimeoutMs,
-					dependencies.fetchImpl,
+					dependencies.fetchImpl ?? projectorBindingFetch(env),
 				);
 			} catch (error) {
 				if (error instanceof Error && error.message === "projection_upstream_timeout") {
