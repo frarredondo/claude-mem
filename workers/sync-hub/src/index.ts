@@ -633,6 +633,21 @@ export async function fetchProjectionWithTimeout(
 	}
 }
 
+/**
+ * Same-account limitation: a Worker cannot fetch another Worker's
+ * *.workers.dev URL in its own zone — the subrequest never routes to the
+ * target Worker. Self-host deployments therefore declare a PROJECTOR service
+ * binding (wrangler.personal.jsonc) and projection pages go through it; the
+ * cmem.ai deployment has no binding and keeps using global fetch. The
+ * INTERNAL_PROJECTOR_URL is still passed as the request URL — service
+ * bindings deliver it verbatim to the bound Worker.
+ */
+function projectorBindingFetch(env: Env): ProjectionFetch | undefined {
+	const projector = env.PROJECTOR;
+	if (!projector) return undefined;
+	return (input, init) => projector.fetch(input, init);
+}
+
 export interface ProjectionDrainDependencies {
 	/** Test seam only; production always uses the 45-second constant. */
 	fetchTimeoutMs?: number;
@@ -759,7 +774,7 @@ export async function drainProjection(
 					requestBody,
 					env.CMEM_INTERNAL_PROJECTOR_SECRET,
 					dependencies.fetchTimeoutMs,
-					dependencies.fetchImpl,
+					dependencies.fetchImpl ?? projectorBindingFetch(env),
 				);
 			} catch (error) {
 				if (error instanceof Error && error.message === "projection_upstream_timeout") {

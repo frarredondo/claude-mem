@@ -25,7 +25,7 @@
 		{
 			"binding": "MEMDB",
 			"database_name": "cmem-memory",
-			// Create in YOUR account: `wrangler d1 create cmem-memory`, paste the id.
+			// Created via `wrangler d1 create cmem-memory` (resource id, not a secret).
 			"database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID"
 		}
 	],

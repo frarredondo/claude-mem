@@ -40,12 +40,22 @@
 			}
 		]
 	},
+	// Same-zone workers.dev fetches do not route Worker-to-Worker, so the
+	// projector is reached through a service binding (src/index.ts
+	// projectorBindingFetch); INTERNAL_PROJECTOR_URL below stays the logical
+	// request URL delivered to the bound Worker.
+	"services": [
+		{
+			"binding": "PROJECTOR",
+			"service": "cmem-self-host"
+		}
+	],
 	"kv_namespaces": [
 		{
 			"binding": "AUTH_CACHE",
-			// Create in YOUR account: `wrangler kv namespace create sync-hub-personal-AUTH_CACHE`
-			// and paste the id here. In static mode this namespace only carries the
-			// kill-switch flag (control: prefix) — auth never touches it.
+			// Created via `wrangler kv namespace create sync-hub-personal-AUTH_CACHE`
+			// (resource id, not a secret). In static mode this namespace only carries
+			// the kill-switch flag (control: prefix) — auth never touches it.
 			"id": "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
 		}
 	],
@@ -60,8 +70,7 @@
 		// the verify path fails closed instead of calling cmem.ai.
 		"TOKEN_VERIFY_URL": "",
 		"AUTH_CACHE_TTL_SECONDS": "60",
-		// The companion self-host worker (projector + MCP). Replace <SUBDOMAIN>
-		// with your workers.dev subdomain after deploying workers/self-host.
+		// The companion self-host worker (projector + MCP).
 		"INTERNAL_PROJECTOR_URL": "https://cmem-self-host.<SUBDOMAIN>.workers.dev/internal/project",
 		"KILL_SWITCH_CACHE_MS": "",
 		// Watchdog vars deliberately empty AND no crons above: fleet-ops

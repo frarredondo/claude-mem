@@ -23,6 +23,13 @@ interface Env {
 	SYNC_STATIC_USER_ID?: string;
 	SYNC_STATIC_TOKEN?: string;
 	/**
+	 * Self-host only (wrangler.personal.jsonc `services`): service binding to
+	 * the companion projector Worker. Same-zone workers.dev fetches do not
+	 * route Worker-to-Worker, so projection pages go through this binding
+	 * when it exists; absent (cmem.ai deployment) global fetch is used.
+	 */
+	PROJECTOR?: Fetcher;
+	/**
 	 * Cloudflare API token for the GraphQL Analytics API.
 	 * Scope: Account → Account Analytics → Read.
 	 * `wrangler secret put ANALYTICS_API_TOKEN`
