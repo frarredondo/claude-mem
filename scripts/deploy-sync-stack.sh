@@ -49,6 +49,15 @@ SLUG_MAX=40
 SECRET_MIN_LEN=32
 PROBE_DEVICE_ID="deploy-sync-stack-probe"
 
+# A workers.dev hostname that THIS run just created answers 404 from the edge
+# until its route propagates, so the first probe of a brand-new Worker can lose
+# a race that says nothing about the stack. Retry only the two codes a
+# not-yet-live route produces — 404 (no route) and 000 (name does not resolve
+# yet) — and never 401/403/500/503, which are real misconfigurations that must
+# fail on the first look rather than after a wait.
+PROBE_RETRIES=6
+PROBE_RETRY_WAIT=5
+
 # wrangler's `secret put` wraps its stdin read in trimTrailingWhitespace(), so
 # the trailing newline `op read` emits is discarded rather than stored.
 export WRANGLER_SEND_METRICS=false
@@ -706,14 +715,30 @@ assert_id_unshared() { # $1 slug, $2 id, $3 label
 # The bearer token reaches curl through a config on stdin, so it never appears
 # in argv. printf is a shell builtin, so it spawns no process of its own.
 verify_status() { # $1 slug, $2 hub url, $3 user id — echoes the http status
-	local slug="$1" hub="$2" uid="$3" token code
-	token="$(op read "op://$VAULT/$(title_sync_token "$slug")/password" | tr -d '\n\r')" \
-		|| die "cannot read \"$(title_sync_token "$slug")\" from vault \"$VAULT\" — is the op session still valid? (\`op whoami\`)"
-	code="$(printf 'url = "%s"\nheader = "Authorization: Bearer %s"\nheader = "X-User-Id: %s"\nheader = "X-Device-Id: %s"\n' \
-		"$hub/v1/sync/status" "$token" "$uid" "$PROBE_DEVICE_ID" \
-		| curl -sS --max-time 20 -o /dev/null -w '%{http_code}' -K - || true)"
-	token=""
-	printf '%s' "$(normalize_http_code "$code")"
+	local slug="$1" hub="$2" uid="$3" token code attempt=1
+	while :; do
+		# Read from op on EVERY attempt and clear it before the next one: the
+		# token is never held across a wait. 1Password stays the only place it
+		# lives, so a retry costs a read rather than keeping a secret warm in a
+		# variable for half a minute.
+		token="$(op read "op://$VAULT/$(title_sync_token "$slug")/password" | tr -d '\n\r')" \
+			|| die "cannot read \"$(title_sync_token "$slug")\" from vault \"$VAULT\" — is the op session still valid? (\`op whoami\`)"
+		code="$(printf 'url = "%s"\nheader = "Authorization: Bearer %s"\nheader = "X-User-Id: %s"\nheader = "X-Device-Id: %s"\n' \
+			"$hub/v1/sync/status" "$token" "$uid" "$PROBE_DEVICE_ID" \
+			| curl -sS --max-time 20 -o /dev/null -w '%{http_code}' -K - || true)"
+		token=""
+		code="$(normalize_http_code "$code")"
+		case "$code" in
+			404|000) ;;   # may be a route that is not live yet — fall through
+			*) break ;;   # anything else is the hub's own answer, retry-proof
+		esac
+		[ "$attempt" -ge "$PROBE_RETRIES" ] && break
+		# stderr, like every output helper, so the captured status stays clean.
+		info "status $code — a workers.dev route created moments ago can still be propagating; retrying in ${PROBE_RETRY_WAIT}s (attempt $attempt/$PROBE_RETRIES)"
+		sleep "$PROBE_RETRY_WAIT"
+		attempt=$(( attempt + 1 ))
+	done
+	printf '%s' "$code"
 }
 
 verify_mcp() { # $1 projector url — echoes the http status of an unauthenticated /mcp
@@ -737,9 +762,10 @@ explain_status() { # $1 code
 		200) ok "hub reachable, projector wired, token accepted" ;;
 		403) err "403 — the token does not own this user id; SYNC_STATIC_TOKEN and SYNC_STATIC_USER_ID belong to different groups" ;;
 		401) err "401 — SYNC_STATIC_TOKEN on the hub differs from the 1Password value" ;;
+		404) err "404 — nothing is serving /v1/sync/status after $(( PROBE_RETRIES * PROBE_RETRY_WAIT ))s of retries; the hub Worker did not deploy, or its workers.dev route is taking unusually long to propagate. The stack itself is already provisioned — re-run to re-verify rather than tearing down" ;;
 		500) err "500 — the hub cannot reach its projector, or the Durable Objects daily quota is exhausted" ;;
 		503) err "503 — the projector is behind; the projection checkpoint has not caught up to head_seq" ;;
-		000) err "no response — check the hub url" ;;
+		000) err "no response after $(( PROBE_RETRIES * PROBE_RETRY_WAIT ))s of retries — check the hub url and this machine's network access" ;;
 		*)   err "unexpected status $1" ;;
 	esac
 }

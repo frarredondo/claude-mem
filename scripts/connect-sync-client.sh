@@ -47,6 +47,15 @@ STATUS_WAIT=20
 RESTART_WAIT=20
 SHUTDOWN_WAIT=15
 PROBE_DEVICE_ID="connect-sync-client-probe"
+
+# Connecting right after deploy-sync-stack.sh can reach a hub whose workers.dev
+# route has not propagated yet, which the edge reports as 404 (no route) or 000
+# (name does not resolve yet). Those two get retried; 401/403/500/503 are the
+# hub's own answers and must fail immediately. Every attempt re-runs op inject,
+# so the token is fetched fresh from 1Password and never held across a wait —
+# the extra reads on this rare path are the point, not a cost to optimise away.
+PROBE_RETRIES=6
+PROBE_RETRY_WAIT=5
 BACKFILL_SCRIPT="$ROOT_DIR/scripts/self-host-backfill.ts"
 
 # ---------------------------------------------------------------- output ----
@@ -504,9 +513,22 @@ probe_hub() { # $1 slug, $2 hub url, $3 user id — echoes the http status
 		|| die "could not write the probe config"
 	# check_credentials has already proven this reference resolves, so a failure
 	# in the op half shows up as curl seeing no config and reporting 000.
-	code="$(op inject -i "$tpl" \
-		| curl -sS --max-time 20 -o /dev/null -w '%{http_code}' -K - 2>/dev/null || true)"
-	printf '%s' "$(normalize_http_code "$code")"
+	local attempt=1
+	while :; do
+		code="$(op inject -i "$tpl" \
+			| curl -sS --max-time 20 -o /dev/null -w '%{http_code}' -K - 2>/dev/null || true)"
+		code="$(normalize_http_code "$code")"
+		case "$code" in
+			404|000) ;;   # may be a route that is not live yet — fall through
+			*) break ;;   # anything else is the hub's own answer, retry-proof
+		esac
+		[ "$attempt" -ge "$PROBE_RETRIES" ] && break
+		# stderr, like every output helper, so the captured status stays clean.
+		info "status $code — a hub deployed moments ago can still be propagating its route; retrying in ${PROBE_RETRY_WAIT}s (attempt $attempt/$PROBE_RETRIES)"
+		sleep "$PROBE_RETRY_WAIT"
+		attempt=$(( attempt + 1 ))
+	done
+	printf '%s' "$code"
 }
 
 # curl prints %{http_code} even when the transfer fails (as 000), so a
@@ -523,7 +545,7 @@ explain_probe() { # $1 code, $2 slug
 		200) ok "hub answered 200 — the token owns this user id and the projector is caught up" ;;
 		401) err "401 — the hub's SYNC_STATIC_TOKEN differs from \"$(title_sync_token "$2")\" in vault \"$VAULT\"; re-running deploy-sync-stack.sh --group $2 pushes the vault value" ;;
 		403) err "403 — the token is valid but does not own this user id; the note's user_id and the hub's SYNC_STATIC_USER_ID belong to different groups" ;;
-		404) err "404 — nothing is serving /v1/sync/status there; the hub Worker for \"$2\" is not deployed, or hub_url in the note is stale" ;;
+		404) err "404 — nothing is serving /v1/sync/status there after $(( PROBE_RETRIES * PROBE_RETRY_WAIT ))s of retries; the hub Worker for \"$2\" is not deployed, hub_url in the note is stale, or the route is taking unusually long to propagate" ;;
 		500) err "500 — the hub cannot reach its projector, or the Durable Objects daily quota is exhausted" ;;
 		503) err "503 — the projector is behind head_seq: deployed, but not caught up, so pushes would be refused. The credentials are fine; re-run once it catches up" ;;
 		000) err "no response — check hub_url in \"$(title_note "$2")\", and that this machine has network access" ;;
