@@ -127,6 +127,8 @@ ASSUME_YES=0
 CANARY=ask          # ask | yes | no
 VERIFY_ONLY=0
 LIST_ONLY=0
+SKIP_OP_CHECK=0
+HUB_URL_OVERRIDE=""
 
 usage() {
 	cat <<USAGE
@@ -147,6 +149,15 @@ Options:
   --yes               Skip confirmations (the Cloudflare account gate still
                       requires a typed yes unless CLOUDFLARE_ACCOUNT_ID is
                       set and matches).
+  --hub-url URL       Record this url as the group's hub instead of the
+                      deployed workers.dev hostname — for a custom domain.
+                      Needs exactly one --group. Without it a redeploy KEEPS
+                      whatever hub_url is already recorded, so a custom domain
+                      survives; pass the workers.dev url here to go back.
+  --skip-op-check     Skip the \`op whoami\` preflight. Use when op is
+                      authorized by biometric unlock or the desktop app and
+                      whoami reports on a different (or deleted) account.
+                      Every 1Password read still fails loudly on its own.
   -h, --help          This message.
 
 A group slug becomes a Cloudflare Worker name: lowercase alphanumerics and
@@ -170,11 +181,13 @@ while [ $# -gt 0 ]; do
 		--group)   [ $# -ge 2 ] || die "--group needs a value";  add_groups "$2"; shift 2 ;;
 		--groups)  [ $# -ge 2 ] || die "--groups needs a value"; add_groups "$2"; shift 2 ;;
 		--vault)   [ $# -ge 2 ] || die "--vault needs a value";  VAULT="$2";      shift 2 ;;
+		--hub-url) [ $# -ge 2 ] || die "--hub-url needs a value"; HUB_URL_OVERRIDE="$2"; shift 2 ;;
 		--list)         LIST_ONLY=1;   shift ;;
 		--verify-only)  VERIFY_ONLY=1; shift ;;
 		--canary)       CANARY=yes;    shift ;;
 		--no-canary)    CANARY=no;     shift ;;
 		--dry-run)      DRY_RUN=1;     shift ;;
+		--skip-op-check) SKIP_OP_CHECK=1; shift ;;
 		--yes|-y)       ASSUME_YES=1;  shift ;;
 		-h|--help)      usage; exit 0 ;;
 		*) usage >&2; die "unknown option: $1" ;;
@@ -284,6 +297,18 @@ new_uuid() {
 }
 
 # --------------------------------------------------------------- 1Password ----
+
+# `op whoami` answers for the CURRENT auth method only. A service-account token
+# in the environment makes it report on that account — and fail outright once
+# the account is deleted or rate-limited — even when biometric/desktop-app
+# unlock would authorize the reads this script actually performs. So the check
+# is a convenience, not a capability test, and --skip-op-check turns it off.
+# Nothing is loosened by skipping it: every read is still `|| die`, so a genuine
+# auth failure surfaces at the first read with 1Password's own message.
+op_signed_in() {
+	[ "$SKIP_OP_CHECK" -eq 1 ] && return 0
+	op whoami >/dev/null 2>&1
+}
 
 # Listings are cached per group: op costs ~1s a call and npx wrangler ~2s, and
 # an uncached multi-group run repeats each of them a dozen times. Every function
@@ -710,6 +735,36 @@ assert_id_unshared() { # $1 slug, $2 id, $3 label
 	done
 }
 
+# hub_url is RECORDED and probed; nothing on the Worker derives from it (no
+# binding, no var), so choosing a value other than the deployed hostname is
+# safe and changes only the note, the summary and the verify target.
+#
+# Precedence: --hub-url, then whatever is already recorded, then the hostname
+# wrangler deployed to. The middle rule is the point — wrangler reports the
+# workers.dev hostname, so without it a redeploy would overwrite a custom
+# domain in the note on every run and quietly send every machine that connects
+# afterwards to a host the operator had moved away from.
+#
+# Progress goes to stderr like every helper here, so the captured url is clean.
+resolve_hub_url() { # $1 note title, $2 deployed url, $3 workers.dev default — echoes the url
+	local recorded
+	if [ -n "$HUB_URL_OVERRIDE" ]; then
+		info "hub url from --hub-url (not the deployed hostname)" >&2
+		printf '%s' "$HUB_URL_OVERRIDE"
+		return 0
+	fi
+	recorded="$(op_note_field "$1" hub_url)"
+	if [ -n "$recorded" ] && [ "$recorded" != "$2" ]; then
+		warn "keeping the recorded hub url rather than the deployed hostname:" >&2
+		info "    recorded  $recorded" >&2
+		info "    deployed  $2" >&2
+		info "    pass --hub-url to change it, or --hub-url \"$3\" to go back to workers.dev" >&2
+		printf '%s' "$recorded"
+		return 0
+	fi
+	printf '%s' "$2"
+}
+
 # ------------------------------------------------------------------ verify ----
 
 # The bearer token reaches curl through a config on stdin, so it never appears
@@ -1064,8 +1119,16 @@ provision_group() { # $1 slug
 	render_hub_config "$slug" "$kv_id" "$user_id" "$sub"
 	put_secret "$(title_sync_token "$slug")"  SYNC_STATIC_TOKEN              "$(hub_config "$slug")"
 	put_secret "$(title_proj_secret "$slug")" CMEM_INTERNAL_PROJECTOR_SECRET "$(hub_config "$slug")"
+	local hub_default
 	hub_url="$(deploy_worker "$(hub_config "$slug")" "$(hub_worker "$slug")")"
-	[ -n "$hub_url" ] || hub_url="https://$(hub_worker "$slug").$sub.workers.dev"
+	hub_default="https://$(hub_worker "$slug").$sub.workers.dev"
+	[ -n "$hub_url" ] || hub_url="$hub_default"
+	hub_url="$(resolve_hub_url "$note_title" "$hub_url" "$hub_default")"
+	# Validated HERE, not inside resolve_hub_url: a die() in a command
+	# substitution kills only the subshell, so the check belongs in the caller
+	# where it can actually stop the run. Covers the recorded value too, which
+	# never passed through the command line.
+	validate_https_url "$hub_url"
 	ok "hub at $hub_url"
 
 	mcp_url="$proj_url/mcp"
@@ -1154,7 +1217,7 @@ preflight() {
 	if [ "$VERIFY_ONLY" -eq 0 ] && [ "$LIST_ONLY" -eq 0 ]; then
 		command -v npx >/dev/null 2>&1 || die "missing required command: npx (for wrangler)"
 	fi
-	op whoami >/dev/null 2>&1 || die "1Password CLI is not signed in — run \`eval \$(op signin)\`"
+	op_signed_in || die "1Password CLI is not signed in — run \`eval \$(op signin)\`, or pass --skip-op-check if op is authorized another way (biometric unlock, desktop app) and only \`op whoami\` is failing"
 	if [ "$VERIFY_ONLY" -eq 0 ] && [ "$LIST_ONLY" -eq 0 ]; then
 		command -v uuidgen >/dev/null 2>&1 || [ -r /proc/sys/kernel/random/uuid ] \
 			|| die "no uuid source: install uuidgen (or provide /proc/sys/kernel/random/uuid)"
@@ -1254,6 +1317,19 @@ NEXT
 }
 
 main() {
+	# Checked here, not beside the flag parser: validate_https_url and die are
+	# defined further down the file, so a parse-time call would hit an
+	# undefined function instead of the check.
+	if [ -n "$HUB_URL_OVERRIDE" ]; then
+		validate_https_url "$HUB_URL_OVERRIDE"
+		# One url cannot describe several hubs. Demanding exactly one group is
+		# what stops --hub-url from stamping a single hostname onto every group
+		# of a multi-group run and pointing them all at one another's data. It
+		# also rules out the interactive prompt, where the count is not yet
+		# known at this point.
+		[ "${#CMEM_GROUPS[@]}" -eq 1 ] \
+			|| die "--hub-url describes one hub, so it needs exactly one --group (got ${#CMEM_GROUPS[@]})"
+	fi
 	preflight
 	select_vault
 	if [ "$LIST_ONLY" -eq 1 ]; then

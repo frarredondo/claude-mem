@@ -118,6 +118,7 @@ SLUG=""
 REPOINT=0
 DRY_RUN=0
 ASSUME_YES=0
+SKIP_OP_CHECK=0
 
 usage() {
 	cat <<USAGE
@@ -136,6 +137,11 @@ Options:
                  then stop. Nothing is probed, written or restarted.
   --yes          Skip the [y/N] prompts and the vault prompt. It does NOT
                  satisfy the typed confirmations for --repoint or the backfill.
+  --skip-op-check
+                 Skip the \`op whoami\` preflight. Use when op is authorized by
+                 biometric unlock or the desktop app and whoami reports on a
+                 different (or deleted) account. The credential check still
+                 proves every reference resolves before anything is written.
   -h, --help     This message.
 
 Writes CLAUDE_MEM_CLOUD_SYNC_HUB_URL, _USER_ID and _TOKEN into
@@ -152,6 +158,7 @@ while [ $# -gt 0 ]; do
 		--vault)  [ $# -ge 2 ] || die "--vault needs a value"; VAULT="$2"; shift 2 ;;
 		--repoint)          REPOINT=1;    shift ;;
 		--dry-run)          DRY_RUN=1;    shift ;;
+		--skip-op-check)    SKIP_OP_CHECK=1; shift ;;
 		--yes|-y)           ASSUME_YES=1; shift ;;
 		-h|--help)          usage; exit 0 ;;
 		*) usage >&2; die "unknown option: $1" ;;
@@ -498,6 +505,18 @@ inject_template() { # $1 template path, $2 destination path
 	# A leftover mustache means op inject left something unresolved.
 	grep -Fq '{{' "$2" && return 1
 	return 0
+}
+
+# `op whoami` answers for the CURRENT auth method only. A service-account token
+# in the environment makes it report on that account — and fail outright once
+# the account is deleted or rate-limited — even when biometric/desktop-app
+# unlock would authorize the reads this script actually performs. So the check
+# is a convenience, not a capability test, and --skip-op-check turns it off.
+# Nothing is loosened by skipping it: the credential check still proves every
+# reference resolves before a single byte is written.
+op_signed_in() {
+	[ "$SKIP_OP_CHECK" -eq 1 ] && return 0
+	op whoami >/dev/null 2>&1
 }
 
 # ------------------------------------------------------------------ probe ----
@@ -1049,7 +1068,7 @@ preflight() {
 		command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
 	done
 	[ -z "$missing" ] || die "missing required tool(s):$missing"
-	op whoami >/dev/null 2>&1 || die "the 1Password CLI is not signed in — run \`op signin\`"
+	op_signed_in || die "the 1Password CLI is not signed in — run \`op signin\`, or pass --skip-op-check if op is authorized another way (biometric unlock, desktop app) and only \`op whoami\` is failing"
 	ok "op $(op --version 2>/dev/null || true), jq $(jq --version 2>/dev/null || true)"
 	command -v sqlite3 >/dev/null 2>&1 \
 		|| warn "sqlite3 not found — the repoint report and the backfill offer will be skipped"

@@ -108,6 +108,8 @@ PURGE_OP=0
 CLEAR_LOCAL=0
 ASSUME_YES=0
 SAW_DRY_RUN=0
+SKIP_OP_CHECK=0
+ALLOW_PARTIAL_SCAN=0
 # Set once the typed word has been given, so a second mutating step in the same
 # run does not ask again — and so a step reached without it still asks.
 CONFIRMED=0
@@ -136,6 +138,15 @@ Options:
   --yes                   Skip the "tear down N group(s)?" [y/N] prompt and
                           the vault prompt. It does NOT satisfy the typed
                           confirmation word, which has no bypass.
+  --allow-partial-scan    With --all, proceed even though 1Password could not
+                          be read. The discovered list then covers only the
+                          Cloudflare account, so a group recorded solely in the
+                          vault will be missed. Ignored without --all.
+  --skip-op-check         Skip the \`op whoami\` check. Use when op is
+                          authorized by biometric unlock or the desktop app
+                          and whoami reports on a different (or deleted)
+                          account. Without it a failing whoami silently drops
+                          vault discovery and every 1Password item id.
   -h, --help              This message.
 
 Per group this removes sync-hub-<slug>, cmem-self-host-<slug>,
@@ -159,10 +170,12 @@ while [ $# -gt 0 ]; do
 		--groups)  [ $# -ge 2 ] || die "--groups needs a value"; add_groups "$2"; shift 2 ;;
 		--vault)   [ $# -ge 2 ] || die "--vault needs a value";  VAULT="$2";      shift 2 ;;
 		--all)                  DISCOVER_ALL=1; shift ;;
+		--allow-partial-scan)   ALLOW_PARTIAL_SCAN=1; shift ;;
 		--delete)               ARMED=1;        shift ;;
 		--purge-op)             PURGE_OP=1;     shift ;;
 		--clear-local-settings) CLEAR_LOCAL=1;  shift ;;
 		--dry-run)              SAW_DRY_RUN=1;  shift ;;
+		--skip-op-check)        SKIP_OP_CHECK=1; shift ;;
 		--yes|-y)               ASSUME_YES=1;   shift ;;
 		-h|--help)              usage; exit 0 ;;
 		*) usage >&2; die "unknown option: $1" ;;
@@ -266,6 +279,16 @@ validate_slug() {
 # and the follow-up block prints titles to look for instead of item ids.
 OP_OK=0
 OP_ITEMS_JSON='[]'
+
+# `op whoami` answers for the CURRENT auth method only. A service-account token
+# in the environment makes it report on that account — and fail outright once
+# the account is deleted or rate-limited — even when biometric/desktop-app
+# unlock would authorize the reads this script actually performs. So the check
+# is a convenience, not a capability test, and --skip-op-check turns it off.
+op_signed_in() {
+	[ "$SKIP_OP_CHECK" -eq 1 ] && return 0
+	op whoami >/dev/null 2>&1
+}
 
 # A failed listing is NOT an empty vault: substituting '[]' would report every
 # item absent and then claim there is nothing left to clean up.
@@ -953,10 +976,18 @@ preflight() {
 		|| die "missing required command: npx (for wrangler)"
 	git -C "$ROOT_DIR" rev-parse --git-dir >/dev/null 2>&1 \
 		|| die "$ROOT_DIR is not a git checkout; the tracked-file check cannot run"
-	if command -v op >/dev/null 2>&1 && op whoami >/dev/null 2>&1; then
+	# Unlike the other two scripts this is a SOFT gate: a failing whoami only
+	# degrades discovery. That makes it worse to get wrong, not better — the
+	# run silently loses vault discovery and every item id, and a teardown that
+	# cannot see the 1Password records is exactly when you want them listed.
+	# --skip-op-check therefore forces the capable path here too.
+	if command -v op >/dev/null 2>&1 && op_signed_in; then
 		OP_OK=1
 	else
 		warn "1Password is unavailable or not signed in — vault discovery and item ids will be skipped"
+		if [ "$SKIP_OP_CHECK" -eq 0 ]; then
+			info "    if op works by biometric unlock and only \`op whoami\` fails, pass --skip-op-check"
+		fi
 	fi
 	ok "jq $(jq --version 2>/dev/null || true), wrangler $("${WRANGLER[@]}" --version 2>/dev/null </dev/null | tail -1 || true)"
 	if [ "$ARMED" -eq 1 ]; then
@@ -1008,7 +1039,25 @@ validate_given_groups() {
 resolve_groups() {
 	local i j found
 	if [ "$DISCOVER_ALL" -eq 1 ]; then
+		# --all exists to be exhaustive, and the vault is one of three discovery
+		# sources. With 1Password unreadable the scan silently omits any group
+		# whose Cloudflare resources are already gone — exactly the orphans a
+		# cleanup run is looking for — while still presenting its output as
+		# "the groups". It errs safe (it under-reports, so nothing unexpected
+		# gets deleted) but leaves records behind, so refuse by default rather
+		# than hand over a partial inventory that reads as complete.
+		if [ "$OP_OK" -eq 0 ] && [ "$ALLOW_PARTIAL_SCAN" -eq 0 ]; then
+			err "--all cannot be exhaustive: 1Password is unreadable, so vault discovery is off"
+			info "    a group recorded only in the vault — Cloudflare resources already"
+			info "    deleted — would not appear in this list"
+			info "    fix the op session, or pass --skip-op-check if only \`op whoami\` fails,"
+			info "    or pass --allow-partial-scan to accept an account-only scan"
+			exit 1
+		fi
 		step "discovering groups"
+		if [ "$OP_OK" -eq 0 ]; then
+			warn "partial scan: the vault was not read, so this list may be incomplete"
+		fi
 		found="$(discover_slugs)"
 		local s
 		for s in $found; do
