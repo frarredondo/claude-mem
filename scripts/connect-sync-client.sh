@@ -220,11 +220,37 @@ ask_typed_word() { # $1 the exact word, $2 what typing it will do
 title_sync_token() { printf 'claude-mem sync %s SYNC_STATIC_TOKEN' "$1"; }
 title_note()       { printf 'claude-mem sync %s stack' "$1"; }
 
-# The two secret references, in exactly the form deploy-sync-stack.sh prints in
-# its summary. Building them in one place is what keeps the preview, the probe
-# and the injected file from ever disagreeing about which item is read.
-ref_token()   { printf 'op://%s/%s/password' "$VAULT" "$(title_sync_token "$1")"; }
-ref_user_id() { printf 'op://%s/%s/%s/user_id' "$VAULT" "$(title_note "$1")" "$OP_SECTION"; }
+# The two secret references. Built in one place so the preview, the probe and
+# the injected file can never disagree about which item is read.
+#
+# They address items by ID, not by title, and that is load bearing. `op read`
+# and `op inject` resolve a title DIFFERENTLY: given a vault holding an
+# archived item whose title matches an active one, op read returns the active
+# item's value while op inject fails outright with "deleted or archived".
+# Observed on a real vault where a re-provisioned group left archived
+# same-titled items behind — the credential check (op read) passed and the
+# write (op inject) then failed, after the backup had already been taken. An
+# item id is unique and carries no archive ambiguity, and the cached listing
+# this script already fetches carries every id, so this costs no extra op call.
+ITEM_ID_TOKEN=""
+ITEM_ID_NOTE=""
+
+ref_token()   { ref_or_die "$ITEM_ID_TOKEN" "$(title_sync_token "$1")" "password"; }
+ref_user_id() { ref_or_die "$ITEM_ID_NOTE"  "$(title_note "$1")" "$OP_SECTION/user_id"; }
+
+# A reference built before check_credentials resolved the ids would read
+# op://<vault>//password. This is the inner half of a two-part guard, and only
+# the outer half can actually stop a run: every caller reaches these through a
+# command substitution, where die exits the SUBSHELL and the caller carries on
+# with an empty reference. So main() asserts both ids directly after the
+# credential check, and this arm exists to name the cause if one ever slips
+# past — render_template's "exactly two references" assertion then catches the
+# malformed output in the main shell.
+ref_or_die() { # $1 item id, $2 title (for the message), $3 field path
+	[ -n "$1" ] \
+		|| die "internal: the item id for \"$2\" was not resolved before building its reference"
+	printf 'op://%s/%s/%s' "$VAULT" "$1" "$3"
+}
 
 is_uuid() {
 	local re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
@@ -342,6 +368,18 @@ op_item_exists() { # $1 title
 	esac
 }
 
+# The id of the single active item with this title. op_item_exists has already
+# proven there is exactly one, so a miss here means the listing changed under
+# us rather than an ambiguity to report.
+op_item_id() { # $1 title — echoes the id
+	local id
+	id="$(op_items | jq -r --arg t "$1" '[.[] | select(.title == $t) | .id] | first // ""')" \
+		|| die "cannot read the vault listing while resolving the id of \"$1\""
+	[ -n "$id" ] \
+		|| die "\"$1\" vanished from the vault listing for \"$VAULT\" between checks — re-run"
+	printf '%s' "$id"
+}
+
 # The note is fetched ONCE into a file and both fields are read from that. Two
 # separate gets would double the traffic against a rate-limited API, but the
 # real reason is that a per-field helper HIDES its own failure: `X="$(helper)"`
@@ -367,17 +405,30 @@ op_group_slugs() {
 		| sort
 }
 
-# The value goes op -> pipe -> wc and is never assigned, so a reference can be
-# proven readable, and its length asserted, without the secret existing
-# anywhere addressable. This is also the "does this reference resolve" check
-# that lets the probe and the injection assume they will succeed.
+# The pre-check MUST use the same resolver as the write, or it proves nothing.
+# It used `op read`; the write uses `op inject`, and the two disagree about
+# titles that also exist on an archived item (see ref_token above). So this
+# renders a throwaway template through op inject — the exact mechanism that
+# installs the settings file — and reports only what can be shown safely:
+# the token's LENGTH and whether the injected user id equals the one read from
+# the note.
 #
-# Returns non-zero when op itself failed (pipefail carries its status through),
-# which is a DIFFERENT condition from resolving to an empty value — so call
-# sites must capture the status rather than assign it bare. Assigning bare
-# would also abort the whole run through errexit, with no message.
-op_ref_len() { # $1 reference — echoes the length; non-zero if op could not read it
-	op read "$1" 2>/dev/null | tr -d '\n\r' | wc -c | tr -d ' '
+# The secret goes op -> pipe -> jq and is never assigned and never written to
+# disk; only the two references reach the template file. Returns non-zero when
+# op inject failed (pipefail carries its status through), which is a DIFFERENT
+# condition from resolving to an empty value — so call sites must capture the
+# status rather than assign it bare. Assigning bare would also abort the whole
+# run through errexit, with no message.
+op_refs_probe() { # $1 user_id ref, $2 token ref, $3 expected user id
+	# echoes "<token length> <yes|no user id matches>"
+	local tpl
+	tpl="$(mktmp)"
+	printf '{"u":"{{ %s }}","t":"{{ %s }}"}\n' "$1" "$2" > "$tpl" \
+		|| die "could not write the credential probe template"
+	op inject -i "$tpl" 2>/dev/null | jq -r --arg expect "$3" '
+		if (.u | type) == "string" and (.t | type) == "string"
+		then "\(.t | length) \(if .u == $expect then "yes" else "no" end)"
+		else empty end'
 }
 
 # -------------------------------------------------------------- settings ----
@@ -1107,28 +1158,16 @@ USER_ID=""
 # Reports every missing piece before dying, so one run names everything that
 # needs fixing rather than one item per run.
 check_credentials() {
-	local tok_title note_title problems=0 len note_json note_read
+	local tok_title note_title problems=0 note_json note_read probe len matches
 	tok_title="$(title_sync_token "$SLUG")"
 	note_title="$(title_note "$SLUG")"
 	step "credentials for group \"$SLUG\""
 
+	# The ids come first: every reference below is built from them, and both
+	# items must be located before a single reference can be assembled.
 	if op_item_exists "$tok_title"; then
-		len="$(op_ref_len "$(ref_token "$SLUG")")" || len=""
-		case "$len" in
-			''|*[!0-9]*)
-				# `op read` exits 1 for a reference that does not resolve just as
-				# it does for a dead session, and the exit status cannot tell them
-				# apart — so name every cause rather than asserting the wrong one.
-				err "\"$tok_title\" is in the vault but its password could not be read: an expired op session, a rate limit, or no \"password\" field on the item (wrong category?)"
-				problems=$(( problems + 1 )) ;;
-			*)
-				if [ "$len" -ge "$SECRET_MIN_LEN" ]; then
-					ok "\"$tok_title\" readable, $len characters"
-				else
-					err "\"$tok_title\" holds $len characters, expected at least $SECRET_MIN_LEN"
-					problems=$(( problems + 1 ))
-				fi ;;
-		esac
+		ITEM_ID_TOKEN="$(op_item_id "$tok_title")"
+		ok "\"$tok_title\" present ($ITEM_ID_TOKEN)"
 	else
 		err "1Password item \"$tok_title\" is missing from vault \"$VAULT\""
 		problems=$(( problems + 1 ))
@@ -1136,10 +1175,11 @@ check_credentials() {
 
 	note_read=0
 	if op_item_exists "$note_title"; then
+		ITEM_ID_NOTE="$(op_item_id "$note_title")"
 		note_json="$(mktmp)"
 		if op_note_fetch "$note_title" "$note_json"; then
 			note_read=1
-			ok "\"$note_title\" present"
+			ok "\"$note_title\" present ($ITEM_ID_NOTE)"
 			USER_ID="$(note_field "$note_json" user_id)"
 			HUB_URL="$(strip_slash "$(note_field "$note_json" hub_url)")"
 		else
@@ -1165,21 +1205,6 @@ check_credentials() {
 			problems=$(( problems + 1 ))
 		else
 			ok "user_id $USER_ID"
-			# Proves the sectioned reference the preview shows actually resolves,
-			# before anything is probed or written.
-			len="$(op_ref_len "$(ref_user_id "$SLUG")")" || len=""
-			case "$len" in
-				'')
-					# Same indistinguishable exit 1 as above, and here the most
-					# likely cause by far is the field sitting outside the section
-					# the reference names — so lead with that.
-					err "the user_id reference could not be read: the field may not be in the \"$OP_SECTION\" section of \"$note_title\", or the op session expired, or the client is rate-limited"
-					problems=$(( problems + 1 )) ;;
-				0|*[!0-9]*)
-					err "the user_id reference resolves to an empty value in \"$note_title\""
-					problems=$(( problems + 1 )) ;;
-				*)  ok "the user_id reference resolves" ;;
-			esac
 		fi
 		if [ -z "$HUB_URL" ]; then
 			err "\"$note_title\" has no hub_url field"
@@ -1192,13 +1217,52 @@ check_credentials() {
 		fi
 	fi
 
+	# Both references, through op inject — the resolver the write itself uses.
+	# Deferred to here rather than folded into the branches above because it
+	# needs both ids AND the note's user_id to compare against, and because one
+	# op inject call proves both references for the price of one.
+	if [ "$problems" -eq 0 ]; then
+		probe="$(op_refs_probe "$(ref_user_id "$SLUG")" "$(ref_token "$SLUG")" "$USER_ID")" || probe=""
+		len="${probe%% *}"
+		matches="${probe##* }"
+		case "$len" in
+			''|*[!0-9]*)
+				# op inject exits 1 for an unresolvable reference exactly as it
+				# does for a dead session, and the status cannot tell them apart
+				# — so name every cause rather than asserting the wrong one.
+				err "the references did not resolve through \`op inject\`, which is what the write uses:"
+				info "    the op session may have expired, or the client is rate-limited,"
+				info "    or \"$tok_title\" has no \"password\" field (wrong category?),"
+				info "    or user_id is not in the \"$OP_SECTION\" section of \"$note_title\""
+				info "    note: \`op read\` can succeed where \`op inject\` fails — if an ARCHIVED"
+				info "    item shares one of these titles, op inject matches the archived one"
+				problems=$(( problems + 1 )) ;;
+			*)
+				if [ "$len" -lt "$SECRET_MIN_LEN" ]; then
+					err "the injected token is $len characters, expected at least $SECRET_MIN_LEN"
+					problems=$(( problems + 1 ))
+				elif [ "$matches" != "yes" ]; then
+					# Cannot happen with id-based references, which is the point of
+					# asserting it: if it ever fires, the reference is reading an
+					# item other than the note this run just validated.
+					err "the injected user_id does not match \"$note_title\" — the reference is reading a different item"
+					problems=$(( problems + 1 ))
+				else
+					ok "both references resolve through op inject (token $len chars, user_id matches)"
+				fi ;;
+		esac
+	fi
+
 	[ "$problems" -eq 0 ] \
 		|| die "$problems missing or unusable credential(s) for group \"$SLUG\" in vault \"$VAULT\" — run \`./scripts/deploy-sync-stack.sh --group $SLUG --vault $(shq "$VAULT")\` to provision them"
 }
 
-# hub_url in the clear; the other two as the pointers deploy-sync-stack.sh
-# prints. These are the same references the template carries, so what is shown
-# is what gets resolved — there is no second version holding values.
+# hub_url in the clear; the other two as references. These are BYTE-IDENTICAL
+# to what the template carries, so what is shown is what gets resolved — there
+# is no second version holding values. That is why the ids appear here rather
+# than the friendlier titles: showing a title would describe a lookup this
+# script does not perform, and the title/id distinction is exactly what broke
+# a run once already. The titles are printed alongside so the ids are legible.
 print_preview() {
 	step "preview"
 	info "these three keys will be set in $SETTINGS_REAL:"
@@ -1210,6 +1274,9 @@ print_preview() {
         CLAUDE_MEM_CLOUD_SYNC_USER_ID = \$(op read "$(ref_user_id "$SLUG")")
         CLAUDE_MEM_CLOUD_SYNC_TOKEN   = \$(op read "$(ref_token "$SLUG")")
 PREVIEW
+	info "referenced by item id, which is what op inject resolves:"
+	info "    $ITEM_ID_NOTE  = \"$(title_note "$SLUG")\""
+	info "    $ITEM_ID_TOKEN  = \"$(title_sync_token "$SLUG")\""
 	if [ -n "$(settings_get CLAUDE_MEM_CLOUD_SYNC_DEVICE_ID)" ]; then
 		info "CLAUDE_MEM_CLOUD_SYNC_DEVICE_ID already exists here and is left untouched —"
 		info "    entity ids derive from it, so keeping it is what makes a re-push idempotent."
@@ -1226,6 +1293,11 @@ main() {
 	choose_group
 	resolve_settings
 	check_credentials
+	# Asserted HERE, not inside ref_or_die: that check runs in a command
+	# substitution's subshell, so its die cannot stop the run. Both ids are set
+	# by check_credentials or it has already died.
+	{ [ -n "$ITEM_ID_TOKEN" ] && [ -n "$ITEM_ID_NOTE" ]; } \
+		|| die "internal: 1Password item ids are unresolved after the credential check"
 
 	WORKER_URL="http://127.0.0.1:$(worker_port)"
 
