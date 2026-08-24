@@ -58,14 +58,11 @@ describe('claudeCodeAdapter.normalizeInput — subagent fields', () => {
     expect(normalized.agentType).toBeUndefined();
   });
 
-  it('handles null/undefined raw input gracefully (SessionStart hook)', () => {
-    const normalizedNull = claudeCodeAdapter.normalizeInput(null);
-    const normalizedUndef = claudeCodeAdapter.normalizeInput(undefined);
-
-    expect(normalizedNull.agentId).toBeUndefined();
-    expect(normalizedNull.agentType).toBeUndefined();
-    expect(normalizedUndef.agentId).toBeUndefined();
-    expect(normalizedUndef.agentType).toBeUndefined();
+  it('rejects null/undefined raw input because cwd is required', () => {
+    expect(() => claudeCodeAdapter.normalizeInput(null))
+      .toThrow('adapter rejected input: invalid_cwd');
+    expect(() => claudeCodeAdapter.normalizeInput(undefined))
+      .toThrow('adapter rejected input: invalid_cwd');
   });
 
   it('drops agent fields that exceed the 128-char safety cap', () => {
