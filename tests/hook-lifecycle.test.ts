@@ -90,11 +90,11 @@ describe('Codex CLI Compatibility (#744)', () => {
       expect(input.sessionId).toBeUndefined();
     });
 
-    it('should handle undefined input gracefully', async () => {
+    it('should reject input without an explicit cwd', async () => {
       const { claudeCodeAdapter } = await import('../src/cli/adapters/claude-code.js');
-      const input = claudeCodeAdapter.normalizeInput(undefined);
-      expect(input.sessionId).toBeUndefined();
-      expect(input.cwd).toBe(process.cwd());
+      expect(() => claudeCodeAdapter.normalizeInput({
+        session_id: 'claude-without-cwd',
+      })).toThrow('adapter rejected input: invalid_cwd');
     });
   });
 

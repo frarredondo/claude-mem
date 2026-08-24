@@ -2,7 +2,7 @@ import { readJsonFromStdin } from './stdin-reader.js';
 import { getPlatformAdapter } from './adapters/index.js';
 import { AdapterRejectedInput } from './adapters/errors.js';
 import { getEventHandler } from './handlers/index.js';
-import type { HookResult } from './types.js';
+import type { EventHandler, HookResult, PlatformAdapter } from './types.js';
 import { HOOK_EXIT_CODES } from '../shared/hook-constants.js';
 import {
   installHookStderrBuffer,
@@ -22,6 +22,18 @@ import { logger } from '../utils/logger.js';
 export interface HookCommandOptions {
   skipExit?: boolean;
 }
+
+export interface HookCommandDependencies {
+  readInput: () => Promise<unknown>;
+  getAdapter: (platform: string) => PlatformAdapter;
+  getHandler: (event: string) => EventHandler;
+}
+
+const DEFAULT_DEPENDENCIES: HookCommandDependencies = {
+  readInput: readJsonFromStdin,
+  getAdapter: getPlatformAdapter,
+  getHandler: getEventHandler,
+};
 
 /**
  * No-op result for hooks that must exit before their handler ran (adapter
@@ -83,12 +95,13 @@ export function isNonBlockingHookInputError(error: unknown): boolean {
 }
 
 async function executeHookPipeline(
-  adapter: ReturnType<typeof getPlatformAdapter>,
-  handler: ReturnType<typeof getEventHandler>,
+  adapter: PlatformAdapter,
+  handler: EventHandler,
   platform: string,
-  options: HookCommandOptions
+  options: HookCommandOptions,
+  readInput: HookCommandDependencies['readInput'],
 ): Promise<number> {
-  const rawInput = await readJsonFromStdin();
+  const rawInput = await readInput();
   const input = adapter.normalizeInput(rawInput);
   input.platform = platform;
   const result = await handler.execute(input);
@@ -100,7 +113,12 @@ async function executeHookPipeline(
   return exitCode;
 }
 
-export async function hookCommand(platform: string, event: string, options: HookCommandOptions = {}): Promise<number> {
+export async function runHookCommand(
+  platform: string,
+  event: string,
+  options: HookCommandOptions = {},
+  dependencies: HookCommandDependencies = DEFAULT_DEPENDENCIES,
+): Promise<number> {
   resetHookIoState();
   // Register the hook event for the threshold-gated hook_failed telemetry
   // (closed enum enforced inside; non-enum events just omit hook_type).
@@ -118,11 +136,11 @@ export async function hookCommand(platform: string, event: string, options: Hook
   // calls are buffered.
   const stderrBuffer = installHookStderrBuffer();
 
-  const adapter = getPlatformAdapter(platform);
-  const handler = getEventHandler(event);
+  const adapter = dependencies.getAdapter(platform);
+  const handler = dependencies.getHandler(event);
 
   try {
-    return await executeHookPipeline(adapter, handler, platform, options);
+    return await executeHookPipeline(adapter, handler, platform, options, dependencies.readInput);
   } catch (error) {
     if (error instanceof AdapterRejectedInput) {
       logger.warn('HOOK', `Adapter rejected input (${error.reason}), skipping hook`);
@@ -172,4 +190,8 @@ export async function hookCommand(platform: string, event: string, options: Hook
   } finally {
     stderrBuffer.restore();
   }
+}
+
+export async function hookCommand(platform: string, event: string, options: HookCommandOptions = {}): Promise<number> {
+  return runHookCommand(platform, event, options);
 }
