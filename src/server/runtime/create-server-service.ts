@@ -271,11 +271,13 @@ function instantiateServerGenerationProvider(provider: string): ServerGeneration
   if (provider === 'openrouter') {
     const apiKey = process.env.OPENROUTER_API_KEY ?? process.env.CLAUDE_MEM_OPENROUTER_API_KEY ?? '';
     if (!apiKey) return null;
-    const opts: { apiKey: string; model?: string; baseUrl?: string } = { apiKey };
+    const opts: { apiKey: string; model?: string; baseUrl?: string; providerSlug?: string } = { apiKey };
     if (process.env.CLAUDE_MEM_SERVER_MODEL) opts.model = process.env.CLAUDE_MEM_SERVER_MODEL;
     // #2382/#2590/#2622/#2393 — optional OpenAI-compatible base URL.
     const baseUrl = process.env.CLAUDE_MEM_OPENROUTER_BASE_URL ?? process.env.OPENROUTER_BASE_URL;
     if (baseUrl) opts.baseUrl = baseUrl;
+    const providerSlug = process.env.CLAUDE_MEM_OPENROUTER_PROVIDER;
+    if (providerSlug) opts.providerSlug = providerSlug;
     return new OpenRouterObservationProvider(opts);
   }
   return null;

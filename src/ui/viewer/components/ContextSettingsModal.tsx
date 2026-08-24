@@ -419,9 +419,20 @@ export function ContextSettingsModal({
                   >
                     <input
                       type="text"
-                      value={formState.CLAUDE_MEM_OPENROUTER_MODEL || 'xiaomi/mimo-v2-flash:free'}
+                      value={formState.CLAUDE_MEM_OPENROUTER_MODEL || 'deepseek/deepseek-v4-flash-0731'}
                       onChange={(e) => updateSetting('CLAUDE_MEM_OPENROUTER_MODEL', e.target.value)}
-                      placeholder="e.g., xiaomi/mimo-v2-flash:free"
+                      placeholder="e.g., deepseek/deepseek-v4-flash-0731"
+                    />
+                  </FormField>
+                  <FormField
+                    label="OpenRouter Provider (Optional)"
+                    tooltip="OpenRouter endpoint slug from the model's providers table (e.g. anthropic, google-vertex). When set, requests use only that provider and fail instead of falling back. Leave empty for automatic routing."
+                  >
+                    <input
+                      type="text"
+                      value={formState.CLAUDE_MEM_OPENROUTER_PROVIDER || ''}
+                      onChange={(e) => updateSetting('CLAUDE_MEM_OPENROUTER_PROVIDER', e.target.value)}
+                      placeholder="e.g., anthropic"
                     />
                   </FormField>
                   <FormField

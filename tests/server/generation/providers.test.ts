@@ -437,4 +437,46 @@ describe('OpenRouterObservationProvider', () => {
     const body = JSON.parse(String(capturing.lastInit?.body)) as { model?: string };
     expect(body.model).toBe('deepseek-chat');
   });
+
+  it('pins OpenRouter routing when a provider slug is set on the default endpoint', async () => {
+    const capturing = new CapturingFetch(
+      jsonResponse(200, { choices: [{ message: { content: 'ok' } }] }),
+    );
+    const provider = new OpenRouterObservationProvider({
+      apiKey: 'fake',
+      providerSlug: 'anthropic',
+      fetchImpl: capturing.fetch,
+    });
+    await provider.generate(makeContext());
+    const body = JSON.parse(String(capturing.lastInit?.body)) as {
+      provider?: { order?: string[]; allow_fallbacks?: boolean };
+    };
+    expect(body.provider).toEqual({ order: ['anthropic'], allow_fallbacks: false });
+  });
+
+  it('omits OpenRouter routing when the provider slug is unset', async () => {
+    const capturing = new CapturingFetch(
+      jsonResponse(200, { choices: [{ message: { content: 'ok' } }] }),
+    );
+    const provider = new OpenRouterObservationProvider({ apiKey: 'fake', fetchImpl: capturing.fetch });
+    await provider.generate(makeContext());
+    const body = JSON.parse(String(capturing.lastInit?.body)) as { provider?: unknown };
+    expect(body.provider).toBeUndefined();
+  });
+
+  it('omits OpenRouter routing on a custom endpoint even when a slug is set', async () => {
+    const capturing = new CapturingFetch(
+      jsonResponse(200, { choices: [{ message: { content: 'ok' } }] }),
+    );
+    const provider = new OpenRouterObservationProvider({
+      apiKey: 'fake',
+      baseUrl: 'https://api.deepseek.com',
+      providerSlug: 'anthropic',
+      fetchImpl: capturing.fetch,
+    });
+    await provider.generate(makeContext());
+    const body = JSON.parse(String(capturing.lastInit?.body)) as { provider?: unknown };
+    expect(body.provider).toBeUndefined();
+  });
 });
+
