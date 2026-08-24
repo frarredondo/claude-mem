@@ -93,6 +93,8 @@ Open the worker URL printed on startup to see the memory viewer.
 
 ## Recommended Models
 
+The shipped default is `deepseek/deepseek-v4-flash-0731`. Override `CLAUDE_MEM_OPENROUTER_MODEL` to use any other OpenRouter model.
+
 ### Free Models
 
 | Model | Provider | Notes |
@@ -117,6 +119,21 @@ To specify a model, add to your settings:
   "CLAUDE_MEM_OPENROUTER_MODEL": "google/gemini-2.0-flash-exp:free"
 }
 ```
+
+## Pinning an OpenRouter Provider
+
+To send a model to one upstream only, set `CLAUDE_MEM_OPENROUTER_PROVIDER` to the endpoint slug from the model's OpenRouter providers table (for example `google-vertex`, not `google/gemini-2.0-flash-exp:free`):
+
+```json
+{
+  "CLAUDE_MEM_PROVIDER": "openrouter",
+  "CLAUDE_MEM_OPENROUTER_API_KEY": "your-key",
+  "CLAUDE_MEM_OPENROUTER_MODEL": "google/gemini-2.0-flash-exp:free",
+  "CLAUDE_MEM_OPENROUTER_PROVIDER": "google-vertex"
+}
+```
+
+The request then uses `provider.order = [slug]` with `allow_fallbacks: false`, so OpenRouter fails instead of switching vendors. Leave the setting empty for automatic routing. Custom `CLAUDE_MEM_OPENROUTER_BASE_URL` endpoints omit this field so strict OpenAI-compatible gateways stay compatible.
 
 ## Custom OpenAI-Compatible Endpoints
 

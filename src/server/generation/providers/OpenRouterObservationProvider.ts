@@ -2,6 +2,7 @@
 
 import { resolveOpenRouterChatCompletionsUrl } from '../../../shared/openrouter-base-url.js';
 import { openRouterAttributionHeaders, OPENROUTER_APP_URL, OPENROUTER_APP_TITLE } from '../../../shared/openrouter-attribution.js';
+import { resolveOpenRouterProviderRouting, type OpenRouterProviderRoutingResolution } from '../../../shared/openrouter-provider-routing.js';
 import { logger } from '../../../utils/logger.js';
 import {
   ServerClassifiedProviderError,
@@ -27,6 +28,7 @@ export interface OpenRouterObservationProviderOptions {
    * http://localhost:1234/v1 (LM Studio), a custom gateway base.
    */
   baseUrl?: string;
+  providerSlug?: string;
   maxOutputTokens?: number;
   siteUrl?: string;
   appName?: string;
@@ -48,6 +50,7 @@ export class OpenRouterObservationProvider implements ServerGenerationProvider {
   private readonly siteUrl: string;
   private readonly appName: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly providerRoutingFragment: OpenRouterProviderRoutingResolution['fragment'];
 
   constructor(options: OpenRouterObservationProviderOptions) {
     if (!options.apiKey) {
@@ -64,6 +67,11 @@ export class OpenRouterObservationProvider implements ServerGenerationProvider {
     this.siteUrl = options.siteUrl ?? OPENROUTER_APP_URL;
     this.appName = options.appName ?? OPENROUTER_APP_TITLE;
     this.fetchImpl = options.fetchImpl ?? fetch;
+    const routing = resolveOpenRouterProviderRouting(options.providerSlug, this.apiUrl);
+    if (routing.warning) {
+      logger.warn('SDK', routing.warning, { apiUrl: this.apiUrl });
+    }
+    this.providerRoutingFragment = routing.fragment;
   }
 
   async generate(
@@ -153,6 +161,7 @@ export class OpenRouterObservationProvider implements ServerGenerationProvider {
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.3,
         max_tokens: this.maxOutputTokens,
+        ...this.providerRoutingFragment,
       }),
       signal,
     });

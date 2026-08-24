@@ -3,6 +3,7 @@ import { getCredential } from '../../shared/EnvManager.js';
 import { resolveOpenRouterChatCompletionsUrl } from '../../shared/openrouter-base-url.js';
 import { openRouterAttributionHeaders, OPENROUTER_APP_TITLE } from '../../shared/openrouter-attribution.js';
 import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
+import { resolveOpenRouterProviderRouting, type OpenRouterProviderRoutingResolution } from '../../shared/openrouter-provider-routing.js';
 import { USER_SETTINGS_PATH } from '../../shared/paths.js';
 import { logger } from '../../utils/logger.js';
 import type { ActiveSession, ConversationMessage } from '../worker-types.js';
@@ -213,6 +214,7 @@ interface OpenRouterConfig {
   apiUrl: string;
   siteUrl?: string;
   appName?: string;
+  providerSlug?: string;
 }
 
 export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfig> {
@@ -266,7 +268,7 @@ export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfi
   }
 
   protected async query(history: ConversationMessage[], config: OpenRouterConfig): Promise<ProviderQueryResult> {
-    return this.queryOpenRouterMultiTurn(history, config.apiKey, config.model, config.apiUrl, config.siteUrl, config.appName);
+    return this.queryOpenRouterMultiTurn(history, config.apiKey, config.model, config.apiUrl, config.siteUrl, config.appName, config.providerSlug);
   }
 
   /** POST the chat-completions request. Extracted so the retry try block stays narrow. */
@@ -277,6 +279,7 @@ export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfi
     messages: OpenAIMessage[],
     siteUrl: string | undefined,
     appName: string | undefined,
+    providerRouting: OpenRouterProviderRoutingResolution['fragment'],
     priorRequestId: string | null,
     attemptSignal: AbortSignal
   ): Promise<Response> {
@@ -297,6 +300,7 @@ export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfi
         // Only sent to openrouter.ai — strict custom gateways may reject
         // unknown body fields.
         ...(apiUrl.includes('openrouter.ai') ? { usage: { include: true } } : {}),
+        ...providerRouting,
       }),
       signal: attemptSignal,
     });
@@ -308,11 +312,16 @@ export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfi
     model: string,
     apiUrl: string,
     siteUrl?: string,
-    appName?: string
+    appName?: string,
+    providerSlug?: string
   ): Promise<ProviderQueryResult> {
     const messages = this.conversationToOpenAIMessages(history);
     const totalChars = history.reduce((sum, m) => sum + m.content.length, 0);
     const estimatedTokens = this.estimateTokens(history.map(m => m.content).join(''));
+    const providerRouting = resolveOpenRouterProviderRouting(providerSlug, apiUrl);
+    if (providerRouting.warning) {
+      logger.warn('SDK', providerRouting.warning, { apiUrl });
+    }
 
     logger.debug('SDK', `Querying OpenRouter multi-turn (${model})`, {
       turns: history.length,
@@ -325,7 +334,7 @@ export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfi
     const data = await withRetry<OpenRouterResponse>(async (attemptSignal) => {
       let response: Response;
       try {
-        response = await this.fetchChatCompletion(apiUrl, apiKey, model, messages, siteUrl, appName, priorRequestId, attemptSignal);
+        response = await this.fetchChatCompletion(apiUrl, apiKey, model, messages, siteUrl, appName, providerRouting.fragment, priorRequestId, attemptSignal);
       } catch (networkError: unknown) {
         const err = networkError instanceof Error ? networkError : new Error(String(networkError));
         throw classifyOpenRouterError({ cause: err });
@@ -423,7 +432,7 @@ export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfi
       ? rawModel
       : Array.isArray(rawModel) && rawModel.length > 0
         ? rawModel.map(String).join(',')
-        : 'xiaomi/mimo-v2-flash:free';
+        : 'deepseek/deepseek-v4-flash-0731';
 
     // Base URL: settings value wins, then OPENROUTER_BASE_URL env var, else
     // the default OpenRouter endpoint (unchanged behavior). #2382/#2590/#2622/#2393.
@@ -432,8 +441,9 @@ export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfi
 
     const siteUrl = settings.CLAUDE_MEM_OPENROUTER_SITE_URL || '';
     const appName = settings.CLAUDE_MEM_OPENROUTER_APP_NAME || OPENROUTER_APP_TITLE;
+    const providerSlug = settings.CLAUDE_MEM_OPENROUTER_PROVIDER || '';
 
-    return { apiKey, model, apiUrl, siteUrl, appName };
+    return { apiKey, model, apiUrl, siteUrl, appName, providerSlug };
   }
 }
 

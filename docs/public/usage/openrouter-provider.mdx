@@ -37,7 +37,7 @@ OpenRouter actively supports democratizing AI access by offering free models. Th
 | **Mistral Nemo** | `mistralai/mistral-nemo:free` | 12B | 128K | Efficient performance |
 
 <Note>
-**Default Model**: Claude-mem uses `xiaomi/mimo-v2-flash:free` by default—a 309B parameter mixture-of-experts model that ranks #1 on SWE-bench Verified and excels at coding and reasoning tasks.
+**Default Model**: Claude-mem uses `deepseek/deepseek-v4-flash-0731` by default. Free OpenRouter models such as `xiaomi/mimo-v2-flash:free` remain available if you want zero-cost extraction.
 </Note>
 
 ### Free Model Considerations
@@ -73,7 +73,8 @@ All free models support:
 |---------|--------|---------|-------------|
 | `CLAUDE_MEM_PROVIDER` | `claude`, `gemini`, `openrouter` | `claude` | AI provider for observation extraction |
 | `CLAUDE_MEM_OPENROUTER_API_KEY` | string | — | Your OpenRouter API key |
-| `CLAUDE_MEM_OPENROUTER_MODEL` | string | `xiaomi/mimo-v2-flash:free` | Model identifier (see list above) |
+| `CLAUDE_MEM_OPENROUTER_MODEL` | string | `deepseek/deepseek-v4-flash-0731` | Model identifier (see list above) |
+| `CLAUDE_MEM_OPENROUTER_PROVIDER` | string | — | Optional: OpenRouter endpoint slug to pin (e.g. `anthropic`). Empty uses automatic routing. |
 | `CLAUDE_MEM_OPENROUTER_SITE_URL` | string | — | Optional: URL for analytics attribution |
 | `CLAUDE_MEM_OPENROUTER_APP_NAME` | string | `claude-mem` | Optional: App name for analytics |
 
@@ -84,8 +85,28 @@ All free models support:
 3. Under **AI Provider**, select **OpenRouter**
 4. Enter your OpenRouter API key
 5. Optionally select a different model
+6. Optionally set **OpenRouter Provider Slug** to pin a specific upstream endpoint
 
 Settings are applied immediately—no restart required.
+
+### Pinning an OpenRouter Provider
+
+Leave `CLAUDE_MEM_OPENROUTER_PROVIDER` empty to keep OpenRouter's automatic routing. To force a single upstream, set it to the **endpoint slug** from the model's [OpenRouter providers table](https://openrouter.ai/models) — for example `anthropic`, `google-vertex`, or `amazon-bedrock`. That is not the same as the model id (`anthropic/claude-3.5-sonnet`).
+
+When set, claude-mem sends:
+
+```json
+{
+  "provider": {
+    "order": ["anthropic"],
+    "allow_fallbacks": false
+  }
+}
+```
+
+If that provider cannot serve the model, the request fails instead of silently using another vendor. The slug is ignored (with a warning) when `CLAUDE_MEM_OPENROUTER_BASE_URL` points at a custom OpenAI-compatible gateway.
+
+Server deployments can set the same value via the `CLAUDE_MEM_OPENROUTER_PROVIDER` environment variable.
 
 ### Manual Configuration
 
@@ -95,7 +116,7 @@ Edit `~/.claude-mem/settings.json`:
 {
   "CLAUDE_MEM_PROVIDER": "openrouter",
   "CLAUDE_MEM_OPENROUTER_API_KEY": "sk-or-v1-your-key-here",
-  "CLAUDE_MEM_OPENROUTER_MODEL": "xiaomi/mimo-v2-flash:free"
+  "CLAUDE_MEM_OPENROUTER_MODEL": "deepseek/deepseek-v4-flash-0731"
 }
 ```
 
@@ -143,7 +164,7 @@ Logs include detailed usage information:
 
 ```
 OpenRouter API usage: {
-  model: "xiaomi/mimo-v2-flash:free",
+  model: "deepseek/deepseek-v4-flash-0731",
   inputTokens: 2500,
   outputTokens: 1200,
   totalTokens: 3700,
@@ -262,7 +283,7 @@ Content-Type: application/json
 **Request Format**:
 ```json
 {
-  "model": "xiaomi/mimo-v2-flash:free",
+  "model": "deepseek/deepseek-v4-flash-0731",
   "messages": [
     {"role": "system", "content": "..."},
     {"role": "user", "content": "..."}
@@ -271,6 +292,8 @@ Content-Type: application/json
   "max_tokens": 4096
 }
 ```
+
+When `CLAUDE_MEM_OPENROUTER_PROVIDER` is set, the body also includes `"provider": { "order": ["<slug>"], "allow_fallbacks": false }`.
 
 ## Comparing Providers
 
@@ -284,7 +307,7 @@ Content-Type: application/json
 | **Setup** | Automatic | API key required | API key required |
 
 <Tip>
-**Recommendation**: Start with OpenRouter's free `xiaomi/mimo-v2-flash:free` model for zero-cost observation extraction. If you need higher quality or encounter rate limits, switch to Claude or add OpenRouter credits for premium models.
+**Recommendation**: The default OpenRouter model is `deepseek/deepseek-v4-flash-0731`. For zero-cost extraction, switch to a free model such as `xiaomi/mimo-v2-flash:free`. If you need higher quality or hit rate limits, switch to Claude or add OpenRouter credits for premium models.
 </Tip>
 
 ## Next Steps
